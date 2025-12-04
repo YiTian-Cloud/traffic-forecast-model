@@ -2,6 +2,13 @@ Traffic Forecast Model
 
 This project contains a small, self-contained machine learning service for forecasting hourly traffic volume and detecting anomalies. It was originally built as a JupyterLab notebook and then refactored into a reusable Python module and a FastAPI web service. A simple HTML/Chart.js dashboard is included to visualize the forecasts.
 
+Live Demo
+
+The full model and dashboard are deployed here:
+
+https://traffic-forecast-model.onrender.com/
+
+This link serves both the API and the interactive UI.
 What This Model Does
 
 The model predicts future hourly traffic counts based on historical patterns. It uses:
