@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Traffic Forecast & Anomalies Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
+        padding: 20px;
+        max-width: 1000px;
+        margin: auto;
+        background: #fafafa;
+      }
+
+      h1 {
+        margin-bottom: 6px;
+      }
+
+      .controls {
+        margin: 20px 0;
+        padding: 12px;
+        background: #ffffff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+      }
+
+      .chart-container {
+        margin-top: 24px;
+        background: #ffffff;
+        padding: 16px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+      }
+
+      canvas {
+        max-width: 100%;
+      }
+
+      pre {
+        font-size: 13px;
+      }
+
+      button {
+        padding: 6px 12px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      input[type="range"] {
+        width: 220px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Traffic Forecast & Anomaly Detection</h1>
+    <p>
+      Interactive forecasting demo built from a time-series ML model
+      (RandomForest/Poisson). Use the slider to choose a future date, and see
+      the hourly forecast from that date.
+    </p>
+
+    <!-- ========== CONTROLS BLOCK ========== -->
+    <div class="controls">
+      <label>
+        <strong>Days from today for forecast start:</strong><br />
+        <input
+          id="daysSlider"
+          type="range"
+          min="0"
+          max="60"
+          value="0"
+          step="1"
+        />
+        <span id="daysLabel"></span>
+      </label>
+
+      <br /><br />
+
+      <label>
+        <strong>Hours to forecast from that start date:</strong>
+        <input id="hoursInput" type="number" value="24" min="1" max="168" />
+      </label>
+
+      <br /><br />
+
+      <button id="refreshBtn">Refresh Forecast</button>
+      <button id="showCodeBtn" style="margin-left: 10px">
+        Show Model Code
+      </button>
+    </div>
+
+    <!-- ========== CHARTS ========== -->
+    <div class="chart-container">
+      <h2>Forecast Chart</h2>
+      <canvas id="forecastChart"></canvas>
+    </div>
+
+    <div class="chart-container">
+      <h2>Anomaly Chart (Recent Test Window)</h2>
+      <canvas id="anomalyChart"></canvas>
+    </div>
+
+    <!-- ========== MODEL CODE BLOCK ========== -->
+    <pre
+      id="codeBlock"
+      style="
+        display: none;
+        white-space: pre-wrap;
+        background: #f5f5f5;
+        padding: 12px;
+        margin-top: 18px;
+        max-height: 400px;
+        overflow: auto;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+      "
+    ></pre>
+
+    <!-- ========== SCRIPT ========== -->
+    <script>
+      let forecastChartInstance = null;
+      let anomalyChartInstance = null;
+      let modelCodeLoaded = false;
+
+      function formatDateYYYYMMDD(date) {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, "0");
+        const d = String(date.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
+      }
+
+      function computeStartDateFromToday(offsetDays) {
+        const today = new Date();
+        const startDate = new Date(
+          today.getFullYear(),
+          today.getMonth(),
+          today.getDate()
+        );
+        startDate.setDate(startDate.getDate() + offsetDays);
+        return startDate;
+      }
+
+      async function fetchJSON(url) {
+        const res = await fetch(url);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} for ${url}`);
+        }
+        return await res.json();
+      }
+
+      // -------- Forecast Chart Loader --------
+      async function loadForecastChart(startDate, hours) {
+        const dateStr = formatDateYYYYMMDD(startDate);
+        const startParam = `${dateStr}T00:00:00`; // midnight of that date
+        const url = `/api/forecast?hours=${encodeURIComponent(
+          hours
+        )}&start=${encodeURIComponent(startParam)}`;
+
+        const forecastData = await fetchJSON(url);
+
+        const labels = forecastData.map((d) =>
+          new Date(d.timestamp).toLocaleString()
+        );
+        const values = forecastData.map((d) => d.pred_mean);
+
+        const ctx = document
+          .getElementById("forecastChart")
+          .getContext("2d");
+
+        if (forecastChartInstance) {
+          forecastChartInstance.destroy();
+        }
+
+        forecastChartInstance = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "Predicted vehicles/hour",
+                data: values,
+                fill: false,
+                tension: 0.25,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            scales: {
+              y: { beginAtZero: true },
+            },
+          },
+        });
+      }
+
+      // -------- Anomaly Chart Loader --------
+      async function loadAnomalyChart() {
+        const data = await fetchJSON("/api/anomalies");
+
+        const ctx = document
+          .getElementById("anomalyChart")
+          .getContext("2d");
+
+        if (!data || data.length === 0) {
+          if (anomalyChartInstance) anomalyChartInstance.destroy();
+          anomalyChartInstance = new Chart(ctx, {
+            type: "line",
+            data: { labels: [], datasets: [] },
+            options: {
+              plugins: {
+                title: {
+                  display: true,
+                  text: "No anomalies detected (or no data)",
+                },
+              },
+            },
+          });
+          return;
+        }
+
+        const labels = data.map((d) =>
+          new Date(d.timestamp).toLocaleString()
+        );
+        const actual = data.map((d) => d.actual);
+        const pred = data.map((d) => d.pred);
+
+        if (anomalyChartInstance) {
+          anomalyChartInstance.destroy();
+        }
+
+        anomalyChartInstance = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "Actual",
+                data: actual,
+                borderWidth: 1,
+                pointRadius: 3,
+              },
+              {
+                label: "Predicted",
+                data: pred,
+                borderWidth: 1,
+                borderDash: [4, 4],
+                pointRadius: 0,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              tooltip: {
+                callbacks: {
+                  afterBody: (ctx) => {
+                    const idx = ctx[0].dataIndex;
+                    const row = data[idx];
+                    return `Residual: ${row.residual.toFixed(
+                      2
+                    )}\nSeverity: ${row.severity.toFixed(2)}\nAnomaly: ${
+                      row.is_anomaly
+                    }`;
+                  },
+                },
+              },
+            },
+            scales: {
+              y: { beginAtZero: true },
+            },
+          },
+        });
+      }
+
+      // -------- Model Code Loader --------
+      async function loadModelCode() {
+        const res = await fetchJSON("/api/model_code");
+        const codeBlock = document.getElementById("codeBlock");
+        codeBlock.textContent = res.code || "# No code returned";
+        codeBlock.style.display = "block";
+        modelCodeLoaded = true;
+      }
+
+      // -------- Initialize Page --------
+      function init() {
+        const daysSlider = document.getElementById("daysSlider");
+        const daysLabel = document.getElementById("daysLabel");
+        const hoursInput = document.getElementById("hoursInput");
+        const refreshBtn = document.getElementById("refreshBtn");
+        const showCodeBtn = document.getElementById("showCodeBtn");
+        const codeBlock = document.getElementById("codeBlock");
+
+        function updateDaysLabelAndMaybeForecast(initial = false) {
+          const offsetDays = parseInt(daysSlider.value, 10) || 0;
+          const startDate = computeStartDateFromToday(offsetDays);
+          const dateStr = formatDateYYYYMMDD(startDate);
+          daysLabel.textContent = `Start date: ${dateStr} (${offsetDays} day${
+            offsetDays === 1 ? "" : "s"
+          } from today)`;
+
+          if (!initial) {
+            const hours = parseInt(hoursInput.value, 10) || 24;
+            loadForecastChart(startDate, hours).catch((err) => {
+              console.error("Forecast load failed:", err);
+            });
+          }
+        }
+
+        // Attach listeners first
+        daysSlider.addEventListener("input", () =>
+          updateDaysLabelAndMaybeForecast(false)
+        );
+
+        refreshBtn.addEventListener("click", () => {
+          const offsetDays = parseInt(daysSlider.value, 10) || 0;
+          const startDate = computeStartDateFromToday(offsetDays);
+          const hours = parseInt(hoursInput.value, 10) || 24;
+          loadForecastChart(startDate, hours).catch((err) => {
+            console.error("Refresh forecast failed:", err);
+            alert("Failed to refresh forecast. Check console for details.");
+          });
+        });
+
+        showCodeBtn.addEventListener("click", () => {
+          if (!modelCodeLoaded) {
+            loadModelCode().catch((err) => {
+              console.error("Load model code failed:", err);
+              alert("Failed to load model code.");
+            });
+          } else {
+            codeBlock.style.display =
+              codeBlock.style.display === "none" ? "block" : "none";
+          }
+        });
+
+        // Initial label & initial loads
+        updateDaysLabelAndMaybeForecast(true);
+
+        (async () => {
+          try {
+            const offsetDays = parseInt(daysSlider.value, 10) || 0;
+            const startDate = computeStartDateFromToday(offsetDays);
+            const hours = parseInt(hoursInput.value, 10) || 24;
+            await loadForecastChart(startDate, hours);
+          } catch (err) {
+            console.error("Initial forecast load failed:", err);
+          }
+
+          try {
+            await loadAnomalyChart();
+          } catch (err) {
+            console.error("Initial anomaly load failed:", err);
+          }
+        })();
+      }
+
+      document.addEventListener("DOMContentLoaded", init);
+    </script>
+  </body>
+</html>
